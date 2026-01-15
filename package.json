@@ -1,0 +1,11 @@
+{
+  "name": "edge-doh",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build"
+  },
+  "dependencies": {
+    "next": "14.1.0"
+  }
+}
