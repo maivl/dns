@@ -1,11 +1,17 @@
 {
-  "name": "edge-doh",
-  "private": true,
+  "name": "vercel-dns-proxy",
+  "version": "1.0.0",
+  "description": "Vercel Edge DoH DNS Proxy (Pure JS)",
   "type": "module",
   "scripts": {
-    "build": "next build"
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
   },
   "dependencies": {
-    "next": "14.1.0"
+    "dns-packet": "^6.1.0",
+    "base64-arraybuffer": "^1.0.1"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
