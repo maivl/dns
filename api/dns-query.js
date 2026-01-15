@@ -1,6 +1,6 @@
 export const config = {
   runtime: 'edge',
-  regions: ['hkg1', 'sin1', 'tok1'],
+  regions: ['hkg1', 'sin1', 'icn1', 'hnd1', 'kix1'],
 };
 
 import { encode, decode } from 'base64-arraybuffer';
