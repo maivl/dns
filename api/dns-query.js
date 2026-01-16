@@ -95,6 +95,7 @@ export default async function handler(req) {
     });
 
   } catch (err) {
+    console.log(err)
     return new Response('DNS Proxy Error', { status: 500 });
   }
 }
