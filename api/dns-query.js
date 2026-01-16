@@ -1,101 +1,126 @@
+/**
+ * Vercel Edge Function – Reverse Split DNS (JSON DoH)
+ *
+ * 策略：
+ * - 默认 → 国内 DNS（阿里 / 腾讯）
+ * - 命中“被墙/海外域名列表” → Cloudflare DNS
+ *
+ * 仅支持：
+ * - GET
+ * - application/dns-json
+ */
+
 export const config = {
   runtime: 'edge',
-  regions: ['hkg1', 'sin1', 'icn1', 'hnd1', 'kix1'],
+  regions: [
+    'hkg1', // 香港（最优）
+    'hnd1', // 东京
+    'kix1', // 大阪
+    'icn1', // 首尔
+    'sin1', // 新加坡
+    'fra1', // 法兰克福
+    'lhr1', // 伦敦
+  ],
 };
 
-import { encode, decode } from 'base64-arraybuffer';
-import dnsPacket from 'dns-packet';
+/* =========================
+   可配置策略区
+========================= */
 
-// ===================== 配置区 =====================
-const CONFIG = {
-  UPSTREAM_DNS_CHINA: 'https://223.5.5.5/dns-query',
-  UPSTREAM_DNS_GLOBAL: 'https://1.1.1.1/dns-query',
-  BLACK_LIST: ['*ad.*', '*analytics.*', '*track.*', '*.doubleclick.net', '*.googleadservices.com'],
-  WHITE_LIST: ['*.google.com', '*.youtube.com', '*.github.com', '*.chat.openai.com'],
-  TTL: 300
-};
+// 国内 DNS（JSON DoH）
+const CHINA_DOH = [
+  'https://dns.alidns.com/resolve',
+  'https://doh.pub/resolve',
+];
 
-const CHINA_DOMAINS = new Set([
-  '.cn', '.com.cn', '.net.cn', '.org.cn', '.gov.cn', '.edu.cn',
-  '.baidu.com', '.taobao.com', '.jd.com', '.163.com', '.qq.com', '.weixin.qq.com'
-]);
+// Cloudflare DNS（海外 / 被墙）
+const GLOBAL_DOH = 'https://cloudflare-dns.com/dns-query';
 
-// ===================== 预编译正则 =====================
-const WHITE_REGEX = CONFIG.WHITE_LIST.map(r => new RegExp(r.replace(/\*/g, '.*')));
-const BLACK_REGEX = CONFIG.BLACK_LIST.map(r => new RegExp(r.replace(/\*/g, '.*')));
+// 被墙 / 海外优先域名（命中即走 Cloudflare）
+const GLOBAL_DOMAIN_SUFFIX = [
+  '.google.com',
+  '.googleapis.com',
+  '.gstatic.com',
+  '.youtube.com',
+  '.ytimg.com',
+  '.openai.com',
+  '.chatgpt.com',
+  '.github.com',
+  '.githubusercontent.com',
+  '.twitter.com',
+  '.x.com',
+  '.facebook.com',
+  '.instagram.com',
+  '.whatsapp.com',
+  '.wikipedia.org',
+];
 
-// ===================== 辅助函数 =====================
-function isChinaDomain(host) {
-  for (const suffix of CHINA_DOMAINS) {
-    if (host.endsWith(suffix)) return true;
-  }
-  return false;
+// 国内 DNS 轮询
+function pickChinaDoH() {
+  return CHINA_DOH[Math.floor(Math.random() * CHINA_DOH.length)];
 }
 
-function isBlocked(host) {
-  if (WHITE_REGEX.some(r => r.test(host))) return false;
-  return BLACK_REGEX.some(r => r.test(host));
+// 是否需要走 Cloudflare
+function shouldUseGlobalDNS(domain) {
+  if (!domain) return false;
+  const d = domain.toLowerCase();
+  return GLOBAL_DOMAIN_SUFFIX.some((suffix) => d.endsWith(suffix));
 }
 
-// ===================== 核心处理 =====================
+/* =========================
+   Edge 主逻辑
+========================= */
+
 export default async function handler(req) {
-  if (!['GET', 'POST', 'OPTIONS'].includes(req.method)) {
-    return new Response('Method Not Allowed', { status: 405 });
-  }
-
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-      }
-    });
-  }
+  const start = Date.now();
 
   try {
-    const url = new URL(req.url);
-    const body = req.method === 'POST' ? await req.arrayBuffer() : null;
-    const dnsData = req.method === 'GET' ? decode(url.searchParams.get('dns') || '') : body;
-
-    const dnsRequest = dnsPacket.decode(new Uint8Array(dnsData));
-    const host = dnsRequest.questions?.[0]?.name || '';
-
-    if (host && isBlocked(host)) {
-      return new Response('', {
-        status: 204,
-        headers: { 'Cache-Control': `max-age=${CONFIG.TTL}` }
-      });
+    if (req.method !== 'GET') {
+      console.warn('[DNS] Reject non-GET:', req.method);
+      return new Response('Method Not Allowed', { status: 405 });
     }
 
-    const upstreamDns = host && isChinaDomain(host)
-      ? CONFIG.UPSTREAM_DNS_CHINA
-      : CONFIG.UPSTREAM_DNS_GLOBAL;
+    const url = new URL(req.url);
+    const name = url.searchParams.get('name');
+    const type = url.searchParams.get('type') || 'A';
 
-    const proxyResponse = await fetch(upstreamDns, {
-      method: req.method,
+    if (!name) {
+      console.warn('[DNS] Missing name param');
+      return new Response('Bad Request: missing name', { status: 400 });
+    }
+
+    const useGlobal = shouldUseGlobalDNS(name);
+    const upstream = useGlobal ? GLOBAL_DOH : pickChinaDoH();
+
+    console.log(
+      `[DNS] ${name} (${type}) → ${useGlobal ? 'GLOBAL' : 'CHINA'} → ${upstream}`
+    );
+
+    const upstreamUrl = new URL(upstream);
+    upstreamUrl.searchParams.set('name', name);
+    upstreamUrl.searchParams.set('type', type);
+
+    const resp = await fetch(upstreamUrl.toString(), {
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/dns-message',
-        'Accept': 'application/dns-message',
-        'Cache-Control': `max-age=${CONFIG.TTL}`
+        Accept: 'application/dns-json',
       },
-      body: req.method === 'POST' ? body : undefined,
-      cf: { cacheTtl: CONFIG.TTL, cacheEverything: true }
     });
 
-    return new Response(proxyResponse.body, {
-      status: proxyResponse.status,
+    console.log(
+      `[DNS] Upstream status=${resp.status} cost=${Date.now() - start}ms`
+    );
+
+    return new Response(resp.body, {
+      status: resp.status,
       headers: {
-        'Content-Type': 'application/dns-message',
-        'Cache-Control': `max-age=${CONFIG.TTL}`,
+        'Content-Type': 'application/dns-json',
+        'Cache-Control': 'max-age=300',
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-      }
+      },
     });
-
   } catch (err) {
-    console.log(err)
+    console.error('[DNS] Internal Error:', err);
     return new Response('DNS Proxy Error', { status: 500 });
   }
 }
